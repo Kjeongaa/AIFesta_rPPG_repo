@@ -458,7 +458,10 @@ class EkgCard(QWidget):
         self._grid_size = None
         self._font_cache = {}
         self._prev_wave_samples = []
-        self._point_buf = []
+        self._trace_y = None
+        self._trace_width = 0
+        self._last_trace_col = None
+        self._last_trace_y = None
         self._pos = 0.0
         self._ring = np.zeros(4096, dtype=np.float32)
         self._ring_pos = 0
@@ -508,7 +511,10 @@ class EkgCard(QWidget):
     def resizeEvent(self, event) -> None:
         self._grid_cache = None
         self._grid_size = None
-        self._point_buf = []
+        self._trace_y = None
+        self._trace_width = 0
+        self._last_trace_col = None
+        self._last_trace_y = None
         self._pos = 0.0
         super().resizeEvent(event)
 
@@ -548,6 +554,8 @@ class EkgCard(QWidget):
             "y_mid": wave_rect.top() + wave_rect.height() * 0.68,
             "width": max(1.0, wave_rect.width()),
             "height": max(1.0, wave_rect.height()),
+            "top": wave_rect.top(),
+            "bottom": wave_rect.bottom(),
             "left": wave_rect.left(),
             "right": wave_rect.right(),
             "step": max(1.0, wave_rect.width() / visible_samples),
@@ -555,21 +563,36 @@ class EkgCard(QWidget):
         }
 
     def _append_point(self, value: float, stats: dict) -> None:
-        width = stats["width"]
+        width = max(1, int(round(stats["width"])))
+        self._ensure_trace(width)
         x_float = self._pos
         x_idx = x_float % width
         normed = max(-1.0, min(1.0, (value - stats["mean"]) / stats["scale"]))
-        y = max(0.0, min(stats["height"] - 1.0, stats["y_mid"] - normed * stats["vert_range"]))
+        y = max(stats["top"], min(stats["bottom"], stats["y_mid"] - normed * stats["vert_range"]))
         next_pos = x_float + stats["step"]
         wrapped = next_pos >= width
-        if wrapped:
-            self._point_buf = []
+        x_col = int(x_idx) % width
+        clear_pixels = max(1, int(round(stats["clear_pixels"])))
+        for dx in range(1, clear_pixels + 1):
+            self._trace_y[(x_col + dx) % width] = np.nan
+        if self._last_trace_col is not None and self._last_trace_y is not None and not wrapped and x_col >= self._last_trace_col:
+            span = max(1, x_col - self._last_trace_col)
+            for col in range(self._last_trace_col, x_col + 1):
+                ratio = (col - self._last_trace_col) / span
+                self._trace_y[col] = self._last_trace_y + (y - self._last_trace_y) * ratio
         else:
-            self._point_buf.append(QPointF(stats["left"] + x_idx, y))
+            self._trace_y[x_col] = y
+        self._last_trace_col = x_col
+        self._last_trace_y = y
         self._pos = next_pos % width
 
     def _wave_rect(self) -> QRectF:
         return QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+
+    def _ensure_trace(self, width: int) -> None:
+        if self._trace_y is None or self._trace_width != width:
+            self._trace_y = np.full(width, np.nan, dtype=np.float32)
+            self._trace_width = width
 
     def _build_grid_cache(self) -> None:
         width = max(1, self.width())
@@ -604,12 +627,27 @@ class EkgCard(QWidget):
         self._grid_size = self.size()
 
     def _draw_wave(self, painter: QPainter) -> None:
-        if len(self._point_buf) < 2:
+        if self._trace_y is None or self._trace_width < 2:
             return
 
-        path = QPainterPath(self._point_buf[0])
-        for point in self._point_buf[1:]:
-            path.lineTo(point)
+        wave_rect = self._wave_rect()
+        paths = []
+        path = None
+        for x, y_value in enumerate(self._trace_y):
+            if np.isnan(y_value):
+                if path is not None:
+                    paths.append(path)
+                    path = None
+                continue
+            point = QPointF(wave_rect.left() + x, float(y_value))
+            if path is None:
+                path = QPainterPath(point)
+            else:
+                path.lineTo(point)
+        if path is not None:
+            paths.append(path)
+        if not paths:
+            return
 
         glow = QColor(PALETTE["neon_green"])
         glow.setAlphaF(0.32)
@@ -617,9 +655,11 @@ class EkgCard(QWidget):
         core_pen = QPen(QColor(PALETTE["neon_green"]), max(2, scaled_radius(self.window().height(), 3)), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
 
         painter.setPen(glow_pen)
-        painter.drawPath(path)
+        for path in paths:
+            painter.drawPath(path)
         painter.setPen(core_pen)
-        painter.drawPath(path)
+        for path in paths:
+            painter.drawPath(path)
 
     def _draw_label(self, painter: QPainter, rect: QRectF) -> None:
         win_h = max(1, self.window().height())
