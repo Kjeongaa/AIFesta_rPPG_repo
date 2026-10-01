@@ -68,6 +68,13 @@ class MonitorShell(QWidget):
 
         self._apply_card_styles()
 
+    def update_data(self, frame_bgr, last_bpm, wave_samples, face_detected) -> None:
+        self._latest_frame = None if frame_bgr is None else frame_bgr.copy()
+        self._last_bpm = last_bpm
+        self._wave_samples = wave_samples
+        self._face_detected = face_detected
+        self.update()
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() == Qt.Key_Escape:
             self.close()

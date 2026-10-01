@@ -21,6 +21,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+from PySide6.QtWidgets import QApplication
 
 # Make the repository root importable when running from src/.
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +32,7 @@ from model_util import make_model
 from signal_processing import estimate_bpm_from_signal, infer_signal
 from frame_source import FrameSource
 from ui import draw_face_panel, make_panel_background, next_log_path, update_ekg_trace
+from ui_qt.shell import MonitorShell, load_app_fonts
 
 
 # ******* Debug UI / optional UDP bridge defaults *******
@@ -63,6 +65,7 @@ def parse_args():
     parser.add_argument("--show-debug-window", dest="show_debug_window", action="store_true")
     parser.add_argument("--no-show-debug-window", dest="show_debug_window", action="store_false")
     parser.set_defaults(show_debug_window=SHOW_DEBUG_WINDOW)
+    parser.add_argument("--ui", choices=["cv", "qt"], default="qt")
     return parser.parse_args()
 
 
@@ -273,6 +276,14 @@ def main():
     source = FrameSource(args.cam_width, args.cam_height, args.fps)
     source.open()
 
+    qt_app = None
+    qt_window = None
+    if args.show_debug_window and args.ui == "qt":
+        qt_app = QApplication.instance() or QApplication(sys.argv)
+        load_app_fonts()
+        qt_window = MonitorShell()
+        qt_window.showFullScreen()
+
     udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if args.send_udp else None
     udp_send_interval = max(args.infer_stride / float(args.fps if args.fps > 0 else 30), 0.1)
     last_no_face_udp_time = 0.0
@@ -392,20 +403,31 @@ def main():
             disp_fps = 1.0 / max(time.time() - t0, 1e-6)
             t0 = time.time()
             if args.show_debug_window:
-                draw_face_panel(
-                    frame_bgr,
-                    ekg_canvas,
-                    ekg_background,
-                    last_bbox,
-                    last_bpm,
-                    disp_fps,
-                    warning_text,
-                )
-                cv2.imshow("Real-time rPPG", frame_bgr)
+                if args.ui == "qt":
+                    qt_window.update_data(
+                        frame_bgr,
+                        last_bpm,
+                        list(ppg_wave_buffer),
+                        face_detected,
+                    )
+                    qt_app.processEvents()
+                    if not qt_window.isVisible():
+                        break
+                else:
+                    draw_face_panel(
+                        frame_bgr,
+                        ekg_canvas,
+                        ekg_background,
+                        last_bbox,
+                        last_bpm,
+                        disp_fps,
+                        warning_text,
+                    )
+                    cv2.imshow("Real-time rPPG", frame_bgr)
 
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord("q"):
-                    break
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord("q"):
+                        break
             frame_idx += 1
     finally:
         source.close()
