@@ -326,7 +326,15 @@ def main():
                     roi_bgr = cv2.resize(roi_bgr, (args.input_size, args.input_size), interpolation=cv2.INTER_AREA)
                     roi_rgb = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2RGB)
                     frame_buffer.append(roi_rgb.astype(np.float32))
-                    cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    corner_len = max(12, int(min(x2 - x1, y2 - y1) * 0.18))
+                    cv2.line(frame_bgr, (x1, y1), (x1 + corner_len, y1), (0, 255, 0), 2)
+                    cv2.line(frame_bgr, (x1, y1), (x1, y1 + corner_len), (0, 255, 0), 2)
+                    cv2.line(frame_bgr, (x2, y1), (x2 - corner_len, y1), (0, 255, 0), 2)
+                    cv2.line(frame_bgr, (x2, y1), (x2, y1 + corner_len), (0, 255, 0), 2)
+                    cv2.line(frame_bgr, (x1, y2), (x1 + corner_len, y2), (0, 255, 0), 2)
+                    cv2.line(frame_bgr, (x1, y2), (x1, y2 - corner_len), (0, 255, 0), 2)
+                    cv2.line(frame_bgr, (x2, y2), (x2 - corner_len, y2), (0, 255, 0), 2)
+                    cv2.line(frame_bgr, (x2, y2), (x2, y2 - corner_len), (0, 255, 0), 2)
 
             if len(frame_buffer) == clip_len and (frame_idx % args.infer_stride == 0):
                 clip = np.stack(frame_buffer, axis=0)
