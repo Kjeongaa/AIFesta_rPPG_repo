@@ -463,6 +463,10 @@ class EkgCard(QWidget):
         self._last_trace_col = None
         self._last_trace_y = None
         self._pos = 0.0
+        self._pending_wave_samples = []
+        self._wave_timer = QTimer(self)
+        self._wave_timer.setInterval(33)
+        self._wave_timer.timeout.connect(self._draw_next_wave_sample)
         self._ring = np.zeros(4096, dtype=np.float32)
         self._ring_pos = 0
         self._ring_count = 0
@@ -474,12 +478,9 @@ class EkgCard(QWidget):
         new_samples = self._extract_new_samples(samples)
         if samples and new_samples:
             stats = self._stats(samples)
-            for value in new_samples:
-                self._ring[self._ring_pos] = float(value)
-                self._ring_pos = (self._ring_pos + 1) % self._ring.size
-                self._ring_count = min(self._ring_count + 1, self._ring.size)
-                self._append_point(float(value), stats)
-            self.update()
+            self._pending_wave_samples.extend((float(value), stats) for value in new_samples)
+            if not self._wave_timer.isActive():
+                self._wave_timer.start()
         elif not samples:
             self.update()
 
@@ -515,8 +516,20 @@ class EkgCard(QWidget):
         self._trace_width = 0
         self._last_trace_col = None
         self._last_trace_y = None
+        self._pending_wave_samples = []
         self._pos = 0.0
         super().resizeEvent(event)
+
+    def _draw_next_wave_sample(self) -> None:
+        if not self._pending_wave_samples:
+            self._wave_timer.stop()
+            return
+        value, stats = self._pending_wave_samples.pop(0)
+        self._ring[self._ring_pos] = value
+        self._ring_pos = (self._ring_pos + 1) % self._ring.size
+        self._ring_count = min(self._ring_count + 1, self._ring.size)
+        self._append_point(value, stats)
+        self.update()
 
     def _extract_new_samples(self, samples: list[float]) -> list[float]:
         previous = self._prev_wave_samples
@@ -637,7 +650,7 @@ class EkgCard(QWidget):
             if np.isnan(y_value):
                 if path is not None:
                     paths.append(path)
-                    path = None
+                path = None
                 continue
             point = QPointF(wave_rect.left() + x, float(y_value))
             if path is None:
