@@ -25,7 +25,7 @@ from PySide6.QtGui import (
     QPen,
     QRadialGradient,
 )
-from PySide6.QtWidgets import QApplication, QFrame, QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 
 PALETTE = {
@@ -451,6 +451,200 @@ class BpmCard(QWidget):
         painter.drawText(QPointF(rect.left(), label_y), "HEART RATE")
 
 
+class EkgCard(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._grid_cache = None
+        self._grid_size = None
+        self._font_cache = {}
+        self._prev_wave_samples = []
+        self._point_buf = []
+        self._pos = 0.0
+        self._ring = np.zeros(4096, dtype=np.float32)
+        self._ring_pos = 0
+        self._ring_count = 0
+        self._last_bpm = None
+
+    def set_wave_samples(self, wave_samples, last_bpm) -> None:
+        self._last_bpm = last_bpm
+        samples = list(wave_samples or [])
+        new_samples = self._extract_new_samples(samples)
+        if samples and new_samples:
+            stats = self._stats(samples)
+            for value in new_samples:
+                self._ring[self._ring_pos] = float(value)
+                self._ring_pos = (self._ring_pos + 1) % self._ring.size
+                self._ring_count = min(self._ring_count + 1, self._ring.size)
+                self._append_point(float(value), stats)
+            self.update()
+        elif not samples:
+            self.update()
+
+    def paintEvent(self, event) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = scaled_radius(self.window().height(), 18)
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+
+        painter.setPen(QPen(QColor(PALETTE["card_border"]), 1))
+        painter.setBrush(QColor(PALETTE["wave_bg"]))
+        painter.drawRoundedRect(rect, radius, radius)
+
+        painter.save()
+        painter.setClipPath(path)
+        if self._grid_cache is None or self._grid_size != self.size():
+            self._build_grid_cache()
+        if self._grid_cache is not None:
+            painter.drawPixmap(0, 0, self._grid_cache)
+        self._draw_wave(painter)
+        painter.restore()
+
+        self._draw_label(painter, rect)
+
+    def resizeEvent(self, event) -> None:
+        self._grid_cache = None
+        self._grid_size = None
+        self._point_buf = []
+        self._pos = 0.0
+        super().resizeEvent(event)
+
+    def _extract_new_samples(self, samples: list[float]) -> list[float]:
+        previous = self._prev_wave_samples
+        if not previous:
+            self._prev_wave_samples = samples
+            return samples
+        if len(samples) >= len(previous) and samples[: len(previous)] == previous:
+            new_samples = samples[len(previous):]
+            self._prev_wave_samples = samples
+            return new_samples
+
+        max_overlap = min(len(previous), len(samples))
+        overlap = 0
+        for count in range(max_overlap, 0, -1):
+            if previous[-count:] == samples[:count]:
+                overlap = count
+                break
+        self._prev_wave_samples = samples
+        return samples[overlap:]
+
+    def _stats(self, samples: list[float]) -> dict:
+        arr = np.asarray(samples, dtype=np.float32)
+        mean = float(np.mean(arr))
+        max_dev = max(float(np.max(arr - mean)), float(np.max(mean - arr)))
+        scale = max(max_dev, 1e-3)
+        wave_rect = self._wave_rect()
+        frame_rate = 30
+        bpm_value = self._last_bpm if (self._last_bpm is not None and self._last_bpm > 0) else 80.0
+        samples_per_cycle = max(2, int(round(frame_rate * 60.0 / bpm_value)))
+        visible_samples = max(samples_per_cycle * 7, 1)
+        return {
+            "mean": mean,
+            "scale": scale,
+            "vert_range": max(1.0, wave_rect.height() * 0.42),
+            "y_mid": wave_rect.top() + wave_rect.height() * 0.68,
+            "width": max(1.0, wave_rect.width()),
+            "height": max(1.0, wave_rect.height()),
+            "left": wave_rect.left(),
+            "right": wave_rect.right(),
+            "step": max(1.0, wave_rect.width() / visible_samples),
+            "clear_pixels": max(3.0, wave_rect.width() * 0.03),
+        }
+
+    def _append_point(self, value: float, stats: dict) -> None:
+        width = stats["width"]
+        x_float = self._pos
+        x_idx = x_float % width
+        normed = max(-1.0, min(1.0, (value - stats["mean"]) / stats["scale"]))
+        y = max(0.0, min(stats["height"] - 1.0, stats["y_mid"] - normed * stats["vert_range"]))
+        next_pos = x_float + stats["step"]
+        wrapped = next_pos >= width
+        if wrapped:
+            self._point_buf = []
+        else:
+            self._point_buf.append(QPointF(stats["left"] + x_idx, y))
+        self._pos = next_pos % width
+
+    def _wave_rect(self) -> QRectF:
+        return QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+
+    def _build_grid_cache(self) -> None:
+        width = max(1, self.width())
+        height = max(1, self.height())
+        pixmap = QPixmap(width, height)
+        pixmap.fill(QColor(PALETTE["wave_bg"]))
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        cell = max(1.0, height / 12.0)
+        minor_pen = QPen(QColor(PALETTE["grid_minor"]), 1)
+        major_pen = QPen(QColor(PALETTE["grid_major"]), 1)
+
+        x = 0.0
+        index = 0
+        while x <= width:
+            painter.setPen(major_pen if index % 5 == 0 else minor_pen)
+            painter.drawLine(round(x), 0, round(x), height)
+            x += cell
+            index += 1
+
+        y = 0.0
+        index = 0
+        while y <= height:
+            painter.setPen(major_pen if index % 5 == 0 else minor_pen)
+            painter.drawLine(0, round(y), width, round(y))
+            y += cell
+            index += 1
+        painter.end()
+
+        self._grid_cache = pixmap
+        self._grid_size = self.size()
+
+    def _draw_wave(self, painter: QPainter) -> None:
+        if len(self._point_buf) < 2:
+            return
+
+        path = QPainterPath(self._point_buf[0])
+        for point in self._point_buf[1:]:
+            path.lineTo(point)
+
+        glow = QColor(PALETTE["neon_green"])
+        glow.setAlphaF(0.32)
+        glow_pen = QPen(glow, scaled_radius(self.window().height(), 11), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        core_pen = QPen(QColor(PALETTE["neon_green"]), max(2, scaled_radius(self.window().height(), 3)), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+
+        painter.setPen(glow_pen)
+        painter.drawPath(path)
+        painter.setPen(core_pen)
+        painter.drawPath(path)
+
+    def _draw_label(self, painter: QPainter, rect: QRectF) -> None:
+        win_h = max(1, self.window().height())
+        font = self._font("Orbitron", "Sans Serif", max(8, round(win_h * 0.016)), QFont.Medium, 115.0)
+        painter.setFont(font)
+        color = QColor(PALETTE["neon_green"])
+        color.setAlphaF(0.85)
+        painter.setPen(color)
+        inset = rect.height() * 0.025
+        metrics = painter.fontMetrics()
+        painter.drawText(QPointF(rect.left() + inset, rect.top() + inset + metrics.ascent()), "rPPG · PULSE WAVE")
+
+    def _font(self, family: str, fallback: str, pixel_size: int, weight: int, spacing_pct: float) -> QFont:
+        key = (family, fallback, pixel_size, weight, spacing_pct)
+        if key not in self._font_cache:
+            font = QFont(family)
+            if not font.exactMatch():
+                font = QFont(fallback)
+            font.setPixelSize(pixel_size)
+            font.setWeight(weight)
+            font.setLetterSpacing(QFont.PercentageSpacing, spacing_pct)
+            self._font_cache[key] = font
+        return self._font_cache[key]
+
+
 class MonitorShell(QWidget):
     def __init__(self) -> None:
         super().__init__()
@@ -460,16 +654,14 @@ class MonitorShell(QWidget):
 
         self.camera_card = CameraCard(self)
         self.bpm_card = BpmCard(self)
-        self.ekg_card = QFrame(self)
-
-        for card in (self.ekg_card,):
-            card.setFrameShape(QFrame.NoFrame)
+        self.ekg_card = EkgCard(self)
 
         self._apply_card_styles()
 
     def update_data(self, frame_bgr, last_bpm, wave_samples, face_detected) -> None:
         self.camera_card.set_frame(frame_bgr)
         self.bpm_card.set_bpm(last_bpm)
+        self.ekg_card.set_wave_samples(wave_samples, last_bpm)
         self._last_bpm = last_bpm
         self._wave_samples = wave_samples
         self._face_detected = face_detected
@@ -507,18 +699,7 @@ class MonitorShell(QWidget):
         self.ekg_card.setGeometry(right_x, top_y + bpm_height + gap, column_width, ekg_height)
 
     def _apply_card_styles(self) -> None:
-        radius = scaled_radius(self.height(), 18)
-        border = PALETTE["card_border"]
-
-        self.ekg_card.setStyleSheet(
-            f"""
-            QFrame {{
-                background: {PALETTE['wave_bg']};
-                border: 1px solid {border};
-                border-radius: {radius}px;
-            }}
-            """
-        )
+        return
 
 
 def main() -> int:
